@@ -1,0 +1,542 @@
+---
+title: ""
+output: pdf_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r, echo=FALSE, results='hide', message=FALSE, warning=FALSE}
+# Set working directory to source file location
+setwd(dirname(rstudioapi::getActiveDocumentContext()[[2]]))
+
+# Chunks don't output anything into the PDF unless told to
+knitr::opts_chunk$set(echo = TRUE)
+
+# Loading required libraries
+library(tidyverse)
+library(tidymodels)
+library(tidytext)
+library(scales)
+library(kableExtra)
+
+# Setting default theme for charts
+theme_set(theme_bw() +
+            theme(plot.title = element_text(face = "bold", size = 12),
+                  plot.subtitle = element_text(face = "italic", size = 10,
+                                               colour = "grey50")))
+
+eval_metrics <- metric_set(rsq, rmse, mape, mae)
+```
+
+# Overview over folder structure
+
+TBD
+
+\newpage
+
+# Question 1
+
+\begin{center}
+\begin{minipage}{.9\linewidth}
+\emph{Are there any issues with the data (missing values, problematic labels, small groups in some categories, useless predictors, etc.)? Describe your data cleaning procedure.}
+\end{minipage}
+\end{center}
+
+Upon reading in the data, I converted all character columns to factors, in order to be able to use the `tidymodels` library for modelling, which requires to do that.
+
+```{r, echo=FALSE, message=FALSE, results='hide', warning=FALSE}
+# Loading the data
+load("Data/obesity.Rdata")
+
+# Manipulations upon import
+data <- obesity %>% 
+  as_tibble() %>% 
+  mutate(across(where(is.character), as.factor))
+
+rm(obesity)
+```
+
+## Data types
+
+After reading in the data, it looks like most columns have the correct data type, i.e. there are no numeric columns that should be factors and vice versa. Two thing I noticed though, were the ordinal columns (FCVC, NCP, CH20, FAF and TUE) and the factor columns (CAEC and CALC). The former currently stored as numeric data, and it might be a consideration to convert them to categorical (factor). The latter are currently stored as factors, as they are free text, but might be encoded as ordinal variables, as they have a natural order, like the other ones.
+
+I tried the default configuration of XGBoost, SVM and Elastic Net to test for what I should do with both of these cases. For FCVC, NCP, CH20, FAF and TUE, it had only a slight negative impact for XGBoost, but improved the OOS $R^2$ for Elastic Net and SVM. Of course, the other case (CAEC and CALC) painted the inverse picture. As I also want to lump infrequent factor levels together at a later point, I convert the numeric ones to factors for all methods, even though XGBoost had a slightly worse performance. As the difference was far less than one percentage point however, my decision should not have a huge impact down the line and might be reversed completely, if factor lumping works well.
+
+## Missing values
+
+There are no missing values in the data.
+
+```{r}
+colSums(is.na(data)) %>% enframe() %>% filter(value > 0)
+```
+
+## Problematic labels or small groups in categories
+
+In order to check for problematic labels or small groups, I visualise the value counts of all nominal variables in \autoref{NominalCounts}. As can be seen, there is a high class imbalance in virtually all predictors except for gender. However, there are a few extremely small groups within the nominal predictors:
+
+- CALC: "always": n = 1
+- MTRANS: "bike" and "motorbike": n = 5, n = 9
+- SMOKE: highly unbalanced: only 2.13% smokers
+
+My approach for these small groups will be using `step_other` from the `recipes` package within the `tidymodels` framework. This function takes a tunable threshold parameter, which sets the minimum frequency for levels within nominal predictors, below which all levels will be lumped into a generic "other" category. During tuning, the threshold parameter can be treated just like the other hyperparameters. It turned out that the threshold was always above 0, indicating that the model benefits from lumping infrequent levels together.
+
+```{r, echo=FALSE, out.width="100%", fig.height=3.5, fig.cap="\\label{NominalCounts}Counts of nominal variables", fig.align='center', message=FALSE, warning=FALSE}
+data %>% 
+  select(where(is.factor)) %>% 
+  pivot_longer(everything()) %>% 
+  group_by(name) %>%
+  count(value) %>% 
+  mutate(n = n/sum(n)) %>% 
+  ggplot(aes(n, 
+             value %>% reorder_within(by = n, within = name))) +
+  geom_col() +
+  facet_wrap(~ name, scales = "free", nrow = 3) +
+  labs(title = "Nominal Variables: Frequency Of Levels",
+       y = NULL,
+       x = "Frequency") +
+  scale_y_reordered() + 
+  scale_x_continuous(labels = percent_format()) +
+  theme(strip.text = element_text(size = 7),
+        axis.text = element_text(size = 7))
+```
+
+Similarly, I analysed the distribution of numerical predictors by using histograms, as shown in \autoref{NumericDist}, in order to check for skew or infrequent levels within ordinal variables. The target variable is not right skewed, so a log transform might not actually be that beneficial. Age and Height (multiplied by 100 for visualisation, not for modelling) are also well behaved. The ordinal predictors are imbalanced at times, but not to a problematic degree. 
+
+There are quite a few 18 and 21 year olds and the number 26.7 shows up quite frequently, so I checked for duplicates and lo and behold, there are duplicated rows:
+
+```{r}
+table(data %>% duplicated())
+```
+
+The question is, whether these are actual duplicated cases or if there is a tiny chance that those are actually different individuals. I made the decision to drop them.
+
+```{r, echo=FALSE, out.width="100%", fig.height=3, fig.cap="\\label{NumericDist}Distribution of numerical variables", fig.align='center', message=FALSE, warning=FALSE}
+data %>% 
+  distinct() %>% 
+  select(where(is.numeric)) %>% 
+  mutate(Height = Height * 100) %>%
+  pivot_longer(everything()) %>%
+  ggplot(aes(x = value, y = ..density..)) +
+  geom_histogram(binwidth = 1) +
+  facet_wrap(~ name, scales = "free", nrow = 2) +
+  labs(title = "Distribution Of Numerical Predictors",
+       subtitle = "Binwidth = 1",
+       y = "Density",
+       x = NULL) +
+  theme(strip.text = element_text(size = 8),
+        axis.text = element_text(size = 8))
+```
+
+## Useless predictors
+
+Useless predictors might be random or zero variance variables. In my preprocessing pipeline, I am including a zero variance filter for every model variation that I'm trying, to the second case is covered. Nonetheless, I visualise the relationship of the predictors with the target using boxplots and scatter plots in \autoref{RelationNominal} and \autoref{RelationNumeric}.
+
+The main takeaways are:
+
+- Nominal predictors: There don't seem to be random variables without any relation, though gender and smoking are not highly predictive by themselves.
+- Numeric predictors: None of the numeric predictors have a tight relationship with BMI, however there are slight trends. In combination with the nominal predictors, there might be interactions and non-linearities that can be exploited from more flexible methods. Discretisation of height and age might be helpful to some models.
+
+```{r, echo=FALSE, out.width="100%", fig.height=3.5, fig.cap="\\label{RelationNominal}Relation of nominal predictors with the target variable", fig.align='center', message=FALSE, warning=FALSE}
+data %>% 
+  select(where(is.factor), BMI) %>% 
+  pivot_longer(-BMI) %>% 
+  group_by(name) %>% 
+  add_count(value) %>% 
+  ungroup() %>% 
+  mutate(value = glue::glue("{value} [N={n}]")) %>% 
+  ggplot(aes(x = BMI,
+             y = value %>% reorder_within(BMI, name, fun = median))) +
+  geom_boxplot() +
+  facet_wrap(~ name, scales = "free", nrow = 3) +
+  labs(title = "Relationship of nominal predictors with the target",
+       y = NULL,
+       x = "BMI") +
+  scale_y_reordered() +
+  theme(axis.text.y = element_text(size = 7),
+        axis.text.x = element_text(size = 7),
+        strip.text = element_text(size = 7))
+```
+
+```{r, echo=FALSE, out.width="100%", fig.height=3.5, fig.cap="\\label{RelationNumeric}Relation of numeric predictors with the target variable", fig.align='center', message=FALSE, warning=FALSE}
+data %>% 
+  select(where(is.numeric)) %>% 
+  pivot_longer(-BMI) %>% 
+  ggplot(aes(x = value,
+             y = BMI)) +
+  geom_point(alpha = 0.3) +
+  geom_smooth(method = "lm") +
+  facet_wrap(~ name, scales = "free_x", nrow = 2) +
+  labs(title = "Relationship of numeric predictors with the target",
+       y = "BMI",
+       x = NULL)
+```
+
+```{r, echo=FALSE, out.width="100%", fig.height=3, fig.cap="\\label{RelationNumericBuckets}Relation of binned numeric predictors with the target variable", fig.align='center', message=FALSE, warning=FALSE}
+data %>% 
+  select(where(is.numeric)) %>% 
+  mutate(Age = round(Age/10)*10,
+         Height = round(Height/0.1)*0.1) %>% 
+  select(BMI, Height, Age) %>% 
+  pivot_longer(-BMI) %>% 
+  ggplot(aes(x = factor(value),
+             y = BMI)) +
+  geom_boxplot() +
+  facet_wrap(~ name, scales = "free_x", nrow = 1) +
+  labs(title = "Relationship of (binned) age and height with the target",
+       subtitle = "Age rounded to nearest 10 years, Height to nearest 10 cm.",
+       y = "BMI",
+       x = NULL)
+```
+
+\newpage
+
+# Question 2
+
+\begin{center}
+\begin{minipage}{.9\linewidth}
+\emph{Describe your preferred prediction method/approach. Did you transform variables in training and test data? Did you partition the data? How did you select the tuning parameters? Which estimation method did you use? Why did you select this method/approach for your preferred specification?}
+\end{minipage}
+\end{center}
+
+## Specification and Splits
+
+Before modelling, I split the data with the target into training and testing and then split the training data further into 5 folds for cross validated hyperparameter tuning. Tuning several hundred hyperparameter combinations on the five folds, I selected the hyperparameter combination with the best cross-validated $R^2$ on the holdout within the folds and trained the model on the full training set, in order to maximise the amount of data before I evaluated each model on the holdout data set I set aside previously. I called the model scripts from one single "parent" script (using `source`), in order to have the same splits and folds for the different model types and eliminate randomness when comparing between them.
+
+My preferred approach is using Gradient Boosting (XGBoost) allowing for new factor levels, removing zero variance predictors and creating dummy variables from nominal predictors. I tried five different preprocessing approaches and compared the out-of-sample $R^2$ (on the test set, which wasn't used for hyperparameter tuning and fitting the training data). Not only was this setting better than all other 4 XGBoost models, but it also dominated all other SVM and Elastic Net models on the holdout set (using mean absolute error, mean absolute percentage error, root mean squared error and $R^2$). Therefore, I chose this model and fit the best specification on the entire data with the target variable in order to maximise data input before making predictions on the holdout without the target.
+
+From the EDA, it already became apparent that there would be many interactions and non-linearities, therefore XGBoost is a great candidate, as tree-ensembles can model these very well. Note that the actual predictions I will hand in come from a stacked model using several candidates of the same specification/preprocessing approach as _gb1_ (using LASSO to blend models together).
+
+## Preprocessing/Transformation of the best candidate
+
+I tried a number of different preprocessing approaches for each model, as can be seen in \autoref{tab:PreprocessingGB} Surprisingly, the model with the least modifications worked best for XGBoost.
+
+```{r, echo=FALSE, results='asis'}
+tibble(
+  "Script Number" = c(rep(x = "In all scripts", 3),
+                      1,
+                      2,
+                      rep(x = 3, 2),
+                      4,
+                      rep(x = 5, 2)
+  ),
+  "Gradient Boosting" = c("Allow new factor levels",
+                          "Remove zero variance predictors",
+                          "Dummies for nominal predictors",
+                          "Nothing additional", 
+                          "Normalise numeric",
+                          "Normalise numeric",
+                          "Log scale target",
+                          "Lump together infrequent levels",
+                          "Log scale target",
+                          "Discretise height and age")
+) %>% 
+  kbl(format = "latex", booktabs = T,
+      caption = "Different preprocessing approaches for gradient boosting \\label{tab:PreprocessingGB}") %>% 
+  collapse_rows(columns = 1, latex_hline = "major", valign = "middle") %>% 
+  kable_styling(full_width = T)
+```
+
+The performance of each of the five different XGBoost models can be seen in \autoref{OOSMetricsGB}. Clearly, _gb1_, which is the first script, worked best with an OOS $R^2$ of 0.855 and the lowest RMSE.
+
+```{r, echo=FALSE, out.width="100%", fig.height=3, fig.cap="\\label{OOSMetricsGB}Out-of-sample evaluation metrics for XGBoost", fig.align='center', message=FALSE, warning=FALSE}
+
+gb1_fit <- readRDS("Models/GB1_fit.rds")
+gb2_fit <- readRDS("Models/GB2_fit.rds")
+gb3_fit <- readRDS("Models/GB3_fit.rds")
+gb4_fit <- readRDS("Models/GB4_fit.rds")
+gb5_fit <- readRDS("Models/GB5_fit.rds")
+
+bind_rows(
+  gb1_fit %>% 
+    collect_predictions() %>% 
+    eval_metrics(truth = BMI, estimate = .pred) %>% 
+    mutate(model = "gb1"),
+  gb2_fit %>% 
+    collect_predictions() %>% 
+    eval_metrics(truth = BMI, estimate = .pred) %>% 
+    mutate(model = "gb2"),
+  gb3_fit %>% 
+    collect_predictions() %>% 
+    # Convert back from log transform
+    mutate(.pred = exp(.pred)) %>% 
+    eval_metrics(truth = BMI, estimate = .pred) %>% 
+    mutate(model = "gb3"),
+  gb4_fit %>% 
+    collect_predictions() %>% 
+    eval_metrics(truth = BMI, estimate = .pred) %>% 
+    mutate(model = "gb4"),
+  gb5_fit %>% 
+    collect_predictions() %>%
+    # Convert back from log transform
+    mutate(.pred = exp(.pred)) %>%
+    eval_metrics(truth = BMI, estimate = .pred) %>% 
+    mutate(model = "gb5")
+) %>% 
+  ggplot(aes(x = model, 
+             y = .estimate)) +
+  geom_point(shape = "square") +
+  labs(title = "OOS Evaluation Metrics of XGBoost",
+       x = NULL, y = NULL) +
+  facet_wrap(~ .metric, scales = "free_y") +
+  theme(panel.grid.minor.y = element_blank())
+```
+
+## Tuning
+
+All final five XGBoost methods were similarly tuned, in order to enable comparison between each preprocessing approach. Specifically, I tuned:
+
+- _trees_: An integer for the number of trees contained in the ensemble.
+- _tree_depth_: An integer for the maximum depth of the tree (i.e. number of splits).
+- _min_n_: An integer for the minimum number of data points in a node that is required for the node to be split further.
+- _loss_reduction_: A number for the reduction in the loss function required to split further.
+- _sample_size_: A number for the number (or proportion) of data that is exposed to the fitting routine.
+- _mtry_: A number for the number (or proportion) of predictors that will be randomly sampled at each split when creating the tree models.
+- _learn_rate_: A number for the rate at which the boosting algorithm adapts from iteration-to-iteration (shrinkage parameter).
+
+I used the folds from the cross validation approach on the training data in order to compute stable performance metrics. The values I provided for the parameters came from a space-filling design (latin hypercube). The space-filling design is particularly useful in cases like this, where the hyperparameter space has high dimensionality and needs optimal coverage, in order to keep it computationally feasible. Additionally, I used parallel processing enabled by the `doParallel` package, in order to speed up the tuning process using 7 of the 8 cores on my CPU.
+
+Where applicable, I also tuned the _threshold_ in the preprocessing pipeline, which determines the levels below which infrequent factor levels get lumped together. From the results, the threshold was always above zero, indicating that the boosting method benefits from eliminating infrequent levels.
+
+\newpage
+
+# Question 3
+
+\begin{center}
+\begin{minipage}{.9\linewidth}
+\emph{Besides your preferred specification, did you test additional variable transformations?}
+\end{minipage}
+\end{center}
+
+As mentioned in Question 2, I wrote different preprocessing pipelines in different scripts and then called them from the parent file. I used the same approach for the other models as well (Elastic Net and SVM), which can be seen in \autoref{tab:PreprocessingENandSVM}.
+
+```{r, echo=FALSE, results='asis'}
+tibble(
+  "Script Number" = c(rep(x = "In all scripts", 4),
+                      1,
+                      2,
+                      3,
+                      4,
+                      rep(x = 5, 2),
+                      rep(x = 6, 2),
+                      rep(x = 7, 2)),
+  "SVM" = c("Allow new factor levels",
+            "Remove zero variance predictors",
+            "Normalise numeric predictors",
+            "",
+            "Nothing additional",
+            "Dummies for nominal predictors",
+            "Lump together infrequent levels",
+            "Log scale target",
+            "Discretise height and age",
+            "Lump together infrequent levels",
+            "Log scale target",
+            "Lump together infrequent levels",
+            "",
+            ""
+  ),
+  "Elastic Net" = c("Allow new factor levels",
+                    "Normalise numeric predictors",
+                    "Dummies for nominal predictors",
+                    "Remove zero variance predictors",
+                    "Nothing additional",
+                    "Lump together infrequent levels",
+                    "Discretise height and age",
+                    "Log scale target",
+                    "Interactions between all predictors",
+                    "",
+                    "Natural splines for Age and Height",
+                    "",
+                    "Natural splines for Age and Height",
+                    "Interactions between all predictors"
+                    
+  )
+) %>% 
+  kbl(format = "latex", booktabs = T,
+      caption = "Different preprocessing approaches for Elastic Net and SVM \\label{tab:PreprocessingENandSVM}") %>% 
+  collapse_rows(columns = 1:3, latex_hline = "major", valign = "middle") %>% 
+  kable_styling(full_width = T)
+```
+
+## SVM Preprocessing Approaches
+
+For SVM, normalising numeric predictors is required to optimise the margin, therefore I included it in all approaches. Additionally, I removed zero variance predictors and allowed for new factor levels that have not been encountered in the training process.
+
+As seen in \autoref{OOSMetricsSVM}, creating dummies from nominal variables hurt the OOS performance. Similarly, discretising height and age did not work well for SVM. The best one is _svm3_, with best OOS metrics across the board and it featured lumping infrequent values together. SVM was really different here, as it benefitted greatly from this step, as opposed to XGBoost for example.
+
+```{r, echo=FALSE, out.width="100%", fig.height=3, fig.cap="\\label{OOSMetricsSVM}Out-of-sample evaluation metrics for SVM", fig.align='center', message=FALSE, warning=FALSE}
+svm1_fit <- readRDS("Models/SVM1_fit.rds")
+svm2_fit <- readRDS("Models/SVM2_fit.rds")
+svm3_fit <- readRDS("Models/SVM3_fit.rds")
+svm4_fit <- readRDS("Models/SVM4_fit.rds")
+svm5_fit <- readRDS("Models/SVM5_fit.rds")
+svm6_fit <- readRDS("Models/SVM6_fit.rds")
+
+bind_rows(
+  svm1_fit %>% 
+    collect_predictions() %>% 
+    eval_metrics(truth = BMI, estimate = .pred) %>% 
+    mutate(model = "svm1"),
+  svm2_fit %>% 
+    collect_predictions() %>% 
+    eval_metrics(truth = BMI, estimate = .pred) %>% 
+    mutate(model = "svm2"),
+  svm3_fit %>% 
+    collect_predictions() %>% 
+    eval_metrics(truth = BMI, estimate = .pred) %>% 
+    mutate(model = "svm3"),
+  svm4_fit %>% 
+    collect_predictions() %>% 
+    # Convert back from log transform
+    mutate(.pred = exp(.pred)) %>% 
+    eval_metrics(truth = BMI, estimate = .pred) %>% 
+    mutate(model = "svm4"),
+  svm5_fit %>% 
+    collect_predictions() %>% 
+    eval_metrics(truth = BMI, estimate = .pred) %>% 
+    mutate(model = "svm5"),
+  svm6_fit %>% 
+    collect_predictions() %>% 
+    # Convert back from log transform
+    mutate(.pred = exp(.pred)) %>% 
+    eval_metrics(truth = BMI, estimate = .pred) %>% 
+    mutate(model = "svm6")
+) %>% 
+  # filter(.metric == "rsq")
+  ggplot(aes(x = model, 
+             y = .estimate)) +
+  geom_point(shape = "square") +
+  labs(title = "OOS Evaluation Metrics for SVM",
+       x = NULL, y = NULL) +
+  facet_wrap(~ .metric, scales = "free_y")
+```
+
+## Elastic Net Preprocessing Approaches
+
+For the elastic net, normalisation is also required, as the penalties will not treat all predictors equally otherwise. Additionally, elastic net needs dummy encoding as well (though that could not be one-hot encoding like in gradient boosting due to multicollinearity, though Lasso should be able to deal with that). Additionally, I also allowed for new factor levels and removed zero variance predictors.
+
+As can be seen in \autoref{OOSMetricsEN}, the biggest jump was made by including interaction terms for all predictors after dummy encoding - it was a huge spike. Including natural splines for age and height helped as well. The best model is _lin7_, which includes both interaction terms and natural splines and works by far the best, almost coming near SVM.
+
+```{r, echo=FALSE, out.width="100%", fig.height=3, fig.cap="\\label{OOSMetricsEN}Out-of-sample evaluation metrics for Elastic Net", fig.align='center', message=FALSE, warning=FALSE}
+lin1_fit <- readRDS("Models/LIN1_fit.rds")
+lin2_fit <- readRDS("Models/LIN2_fit.rds")
+lin3_fit <- readRDS("Models/LIN3_fit.rds")
+lin4_fit <- readRDS("Models/LIN4_fit.rds")
+lin5_fit <- readRDS("Models/LIN5_fit.rds")
+lin6_fit <- readRDS("Models/LIN6_fit.rds")
+lin7_fit <- readRDS("Models/LIN7_fit.rds")
+
+bind_rows(
+  lin1_fit %>% 
+    collect_predictions() %>% 
+    eval_metrics(truth = BMI, estimate = .pred) %>% 
+    mutate(model = "lin1"),
+  lin2_fit %>% 
+    collect_predictions() %>% 
+    eval_metrics(truth = BMI, estimate = .pred) %>% 
+    mutate(model = "lin2"),
+  lin3_fit %>% 
+    collect_predictions() %>% 
+    eval_metrics(truth = BMI, estimate = .pred) %>% 
+    mutate(model = "lin3"),
+  lin4_fit %>% 
+    collect_predictions() %>% 
+    # Convert back from log transform
+    mutate(.pred = exp(.pred)) %>%
+    eval_metrics(truth = BMI, estimate = .pred) %>% 
+    mutate(model = "lin4"),
+  lin5_fit %>% 
+    collect_predictions() %>% 
+    eval_metrics(truth = BMI, estimate = .pred) %>% 
+    mutate(model = "lin5"),
+  lin6_fit %>% 
+    collect_predictions() %>% 
+    eval_metrics(truth = BMI, estimate = .pred) %>% 
+    mutate(model = "lin6"),
+  lin7_fit %>% 
+    collect_predictions() %>% 
+    eval_metrics(truth = BMI, estimate = .pred) %>% 
+    mutate(model = "lin7"),
+) %>% 
+  ggplot(aes(x = model, 
+             y = .estimate)) +
+  geom_point(shape = "square") +
+  labs(title = "OOS Evaluation Metrics for Elastic Net",
+       x = NULL, y = NULL) +
+  facet_wrap(~ .metric, scales = "free_y")
+```
+
+\newpage
+
+# Question 4
+
+\begin{center}
+\begin{minipage}{.9\linewidth}
+\emph{Besides your preferred specification, did you test additional ways to select the tuning parameters and/or partition the sample?}
+\end{minipage}
+\end{center}
+
+## Splits
+
+Using the most simple model specifications for each model type, I experimented with stratified resampling and found that setting the strata to be BMI, in order to preserve the distributions of the target in both train and test split benefitted the out-of-sample performance. This seemed logical, as the model performance we hope to achieve stands entirely on the assumptions that the relations between predictors and target remain the same, going from training to deployment in praxis, where we do not observe the target beforehand. 
+
+Furthermore, I tried a higher number of folds for cross validation than 5, but as the standard error of the performance metrics was not highly volatile, I decided to go for the benefit of making the training times faster and allow me to cycle through more hyperparameter combinations, thus benefitting the overall modelling process. Additionally, I played with the proportion of the train/test split, but decided to keep the default of 75%, as it seemed to be a good enough tradeoff between ability to evaluate and ability to train the model.
+
+## Tuning
+
+I tried using a regular grid as opposed to a space-filling design, but the benefit of covering the hyperparameter space optimally was very noticeable in the training time and made training much more efficient. Therefore, I kept it at the lower end of the generally recommended range of 5 to 10 folds.
+\newpage
+
+# Question 5
+
+\begin{center}
+\begin{minipage}{.9\linewidth}
+\emph{Besides your preferred specification, did you test additional estimation methods/approaches?}
+\end{minipage}
+\end{center}
+
+As already mentioned above, besides Gradient Boosting, I tried Support Vector Machines and Elastic Net with the preprocessing/transformation steps outlined above.
+
+For the SVM, I used the radial basis function and tuned both the cost parameter and the sigma of the function with the space-filling design on 200 combinations, outlined above. For the Elastic Net, I used the _glmnet_ engine and tuned the linear mixture parameter between Ridge and Lasso, as well as the penalty parameter lambda.
+
+As can be seen in \autoref{BestModels}, XGBoost performed the best out of all three model types. From \autoref{BestModels}, it also becomes apparent that all models beat the baseline of a featureless predictor.
+
+\newpage
+
+# Question 6
+
+\begin{center}
+\begin{minipage}{.9\linewidth}
+\emph{Did you use or test methods/approaches that were not covered in the lecture?}
+\end{minipage}
+\end{center}
+
+The RBF SVM and XGBoost methods I used were not covered in the lecture. Additionally, I created a blended model of candidates in the tuning process of the best XGBoost model, which are then linearly stacked using a lasso approach to further increase predictive performance of the best model. The performance of the _gb_blended_ model can be seen in \autoref{BestModels} - it is only marginally better. In practice, it might be debated, whether the increased complexity and computational expensiveness is worth the marginal increase, but for this example, where OOS $R^2$ is also evaluated, I will hand in predictions from the stacked model, which uses the same preprocessing approach and specification as already outlined in Question 2.
+
+```{r, echo=FALSE, out.width="100%", fig.height=3, fig.cap="\\label{BestModels}Out-of-sample evaluation metrics for the best models within each model type", fig.align='center', message=FALSE, warning=FALSE}
+bind_rows(
+  gb1_fit %>% 
+    collect_predictions() %>% 
+    eval_metrics(truth = BMI, estimate = .pred) %>% 
+    mutate(model = "gb1"),
+  svm3_fit %>% 
+    collect_predictions() %>% 
+    eval_metrics(truth = BMI, estimate = .pred) %>% 
+    mutate(model = "svm3"),
+  lin7_fit %>% 
+    collect_predictions() %>% 
+    eval_metrics(truth = BMI, estimate = .pred) %>% 
+    mutate(model = "lin7"),
+  read_csv("Models/blended_gb_metrics.csv") %>% 
+    mutate(model = "gb_blended")
+) %>% 
+  ggplot(aes(x = model, 
+             y = .estimate)) +
+  geom_point(shape = "square") +
+  labs(title = "Comparing the best models to the blended model",
+       subtitle = "Out-of-sample performance",
+       x = NULL, y = NULL) +
+  facet_wrap(~ .metric, scales = "free_y")
+```
+
+\newpage
+

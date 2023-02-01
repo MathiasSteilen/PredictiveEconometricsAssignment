@@ -1,0 +1,15 @@
+Gender {Female, Male}
+Age numeric
+Height numeric in meters
+family_history_with_overweight {yes,no}
+FAVC = Frequent consumption of high caloric food {yes, no}
+FCVC = Frequency of consumption of vegetables {1 = Never, 2 = Sometimes, 3 = Always}
+NCP = Number of main meals
+CAEC = Consumption of food between meals {no, Sometimes, Frequently, Always}
+SMOKE {yes, no}
+CH2O = Consumption of water daily {1 = Less than a liter, 2 = Between 1 and 2L, 3 = More than 2L}
+SCC = Do you monitor the calories you eat daily? {yes, no}
+FAF = Physical activity frequency {0 = No physical activity, 1 = 1 to 2 days, 2 = 2 to 4 days, 3 = 4 to 5 days / week}
+TUE = Time using technology devices such as cell phone, videogames, TV, computer, etc. in free time {0 = 0-2 hours/day, 1 = 3-5 hours/day, 2 = more than 5 hours/day}
+CALC = Consumption of alcohol {no, Sometimes, Frequently, Always}
+MTRANS = Usual mode of transport {Automobile, Motorbike, Bike, Public_Transportation, Walking}
