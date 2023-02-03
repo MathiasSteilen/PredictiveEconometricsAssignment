@@ -1,0 +1,31 @@
+---
+title: ""
+output: pdf_document
+editor_options: 
+  chunk_output_type: console
+---
+
+\spacing{1.5}
+
+# Appendices
+
+## Appendix A: Additional Figure on Variable Importance
+
+```{r Selected funds annual characteristics relative Large Cap Growth, echo=FALSE, cache=TRUE, warning=FALSE, message=FALSE, out.width="100%", fig.height=5, fig.cap="\\label{VarImpGB}Variable importance (Gini Impurity) for the final gradient boosting model", fig.align='center'}
+# ____________________________________________________________________________
+# ADMIN
+
+gb_final_fit <- readRDS("Models/gb_final_fit.rds")
+
+# ____________________________________________________________________________
+# VARIABLE IMPORTANCE
+
+gb_final_fit %>% 
+  extract_fit_parsnip() %>% 
+  vip::vi() %>% 
+  ggplot(aes(y = Variable %>% fct_reorder(Importance), 
+             x = Importance)) +
+  geom_col() +
+  labs(title = "Variable Importnace: Final XGBoost Model",
+       y = NULL)
+```

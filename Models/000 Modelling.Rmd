@@ -1,5 +1,5 @@
 ---
-title: "Predictive Econometrics: Individual Task - Modelling File"
+title: "Predictive Econometrics: Individual Task - Modelling Parent File"
 output: 
   html_document:
     theme: simplex
@@ -11,15 +11,6 @@ output:
 editor_options: 
   chunk_output_type: console
 ---
-
-<style>
-body {
-text-align: justify}
-</style>
-
-<!-- ```{css, echo=FALSE} -->
-<!-- pre, code {white-space:pre !important; overflow-x:auto} -->
-<!-- ``` -->
 
 ### Admin
 
@@ -183,8 +174,7 @@ Encoding as factors makes:
 - GB slightly worse; 0.858 -> 0.852
 - SVM slightly better; 0.822 -> 0.840
 
-Conclusion: Change to factors, as ambiguous for GB, but definitely better for the others
-
+Conclusion: Change to factors for SVM and EN
 
 ***
 ### Encoding ordinal factors to numeric vs. not doing that
@@ -269,16 +259,18 @@ source("GB1.R")
 source("SVM1.R")
 ```
 
-Encoding as factors makes:
+Encoding as ordinal makes:
 - OLS slightly worse; 0.491 -> 0.441
 - GB better; 0.858 -> 0.861
 - SVM slightly worse; 0.822 -> 0.813
 
+Conclusion: Only for GB
+
 ***
-### Running all possible model combinations
+### Running the Tuning and Fitting Process
 ***
 
-First configuration:
+First configuration (preprocessing for SVM and EN):
 
 ```{r}
 # Reading in the data
@@ -328,6 +320,8 @@ source("SVM5.R")
 source("SVM6.R")
 ```
 
+Second: Preprocessing for GB
+
 ```{r}
 # Reading in the data
 # Loading the data
@@ -371,185 +365,15 @@ source("GB4.R")
 source("GB5.R")
 ```
 
-Inspect tuning results:
-
-```{r}
-lin1_tune <- readRDS("LIN1_tune.rds")
-lin2_tune <- readRDS("LIN2_tune.rds")
-lin3_tune <- readRDS("LIN3_tune.rds")
-lin4_tune <- readRDS("LIN4_tune.rds")
-lin5_tune <- readRDS("LIN5_tune.rds")
-lin6_tune <- readRDS("LIN6_tune.rds")
-```
-
-Better way to numerically compare the models here? For instance like the chart below
-
-```{r, fig.width=8, fig.height=4.95, dpi=300, dev="png", warning=FALSE}
-bind_rows(
-  lin1_tune %>% 
-    show_best(metric = "rsq") %>% 
-    head(1) %>% 
-    mutate(model = "LIN1"),
-  lin2_tune %>%
-    show_best(metric = "rsq") %>% 
-    head(1) %>% 
-    mutate(model = "LIN2"),
-  lin3_tune %>%
-    show_best(metric = "rsq") %>% 
-    head(1) %>% 
-    mutate(model = "LIN3"),
-  lin4_tune %>%
-    show_best(metric = "rsq") %>% 
-    head(1) %>% 
-    mutate(model = "LIN4"),
-  lin5_tune %>%
-    show_best(metric = "rsq") %>% 
-    head(1) %>% 
-    mutate(model = "LIN5"),
-  lin6_tune %>%
-    show_best(metric = "rsq") %>% 
-    head(1) %>% 
-    mutate(model = "LIN6")
-) %>% 
-  select(penalty, mixture, threshold, model) %>% 
-  pivot_longer(-model) %>% 
-  ggplot(aes(x = model, 
-             y = value)) +
-  geom_col() +
-  facet_wrap(~ name, scales = "free") +
-  labs(title = "Hyperparameter Tuning Results",
-       x = NULL,
-       y = NULL) +
-  theme_bw() +
-  theme(plot.title = element_text(face = "bold", size = 12),
-        plot.subtitle = element_text(face = "italic", colour = "grey50"),
-        legend.position = "none")
-```
-
-Inspect out-of-sample fit:
-
-Linear Models:
-
-```{r}
-lin1_fit <- readRDS("LIN1_fit.rds")
-lin2_fit <- readRDS("LIN2_fit.rds")
-lin3_fit <- readRDS("LIN3_fit.rds")
-lin4_fit <- readRDS("LIN4_fit.rds")
-lin5_fit <- readRDS("LIN5_fit.rds")
-lin6_fit <- readRDS("LIN6_fit.rds")
-lin7_fit <- readRDS("LIN7_fit.rds")
-
-bind_rows(
-  lin1_fit %>% 
-    collect_predictions() %>% 
-    eval_metrics(truth = BMI, estimate = .pred) %>% 
-    mutate(model = "lin1"),
-  lin2_fit %>% 
-    collect_predictions() %>% 
-    eval_metrics(truth = BMI, estimate = .pred) %>% 
-    mutate(model = "lin2"),
-  lin3_fit %>% 
-    collect_predictions() %>% 
-    eval_metrics(truth = BMI, estimate = .pred) %>% 
-    mutate(model = "lin3"),
-  lin4_fit %>% 
-    collect_predictions() %>% 
-    # Convert back from log transform
-    mutate(.pred = exp(.pred)) %>%
-    eval_metrics(truth = BMI, estimate = .pred) %>% 
-    mutate(model = "lin4"),
-  lin5_fit %>% 
-    collect_predictions() %>% 
-    eval_metrics(truth = BMI, estimate = .pred) %>% 
-    mutate(model = "lin5"),
-  lin6_fit %>% 
-    collect_predictions() %>% 
-    eval_metrics(truth = BMI, estimate = .pred) %>% 
-    mutate(model = "lin6"),
-  lin7_fit %>% 
-    collect_predictions() %>% 
-    eval_metrics(truth = BMI, estimate = .pred) %>% 
-    mutate(model = "lin7"),
-) %>% 
-  ggplot(aes(x = model, 
-             y = .estimate)) +
-  geom_point() +
-  labs(title = "OOS Evaluation Metrics for Elastic Net",
-       x = NULL, y = NULL) +
-  facet_wrap(~ .metric, scales = "free_y")
-```
-
-```{r}
-# Can't really interpret this plot like this, because of the 
-# transformations. Need to transform the target variable back
-tibble(
-  trained = list(lin1_fit, lin2_fit, lin3_fit, lin4_fit, lin5_fit, lin6_fit),
-  description = c("LIN1", "LIN2", "LIN3", "LIN4", "LIN5", "LIN6")
-) %>% 
-  mutate(trained_workflow = map(trained, ~ extract_workflow(.x)),
-         predictions = map(trained_workflow,
-                           ~ .x %>% 
-                             augment(dt_test))) %>% 
-  select(description, predictions) %>% 
-  unnest(predictions) %>% 
-  mutate(.pred = case_when(
-    description == "LIN4" ~ exp(.pred),
-    TRUE ~ .pred,
-  )) %>% 
-  ggplot(aes(BMI, .pred)) +
-  geom_point(alpha = 0.5) +
-  geom_abline() +
-  facet_wrap(~ description, scales = "free", ncol = 6)
-```
-
-Gradient Boosting Models:
-
 ```{r}
 gb1_fit <- readRDS("GB1_fit.rds")
 gb2_fit <- readRDS("GB2_fit.rds")
 gb3_fit <- readRDS("GB3_fit.rds")
 gb4_fit <- readRDS("GB4_fit.rds")
 gb5_fit <- readRDS("GB5_fit.rds")
-
-bind_rows(
-  gb1_fit %>% 
-    collect_predictions() %>% 
-    eval_metrics(truth = BMI, estimate = .pred) %>% 
-    mutate(model = "gb1"),
-  gb2_fit %>% 
-    collect_predictions() %>% 
-    eval_metrics(truth = BMI, estimate = .pred) %>% 
-    mutate(model = "gb2"),
-  gb3_fit %>% 
-    collect_predictions() %>% 
-    # Convert back from log transform
-    mutate(.pred = exp(.pred)) %>% 
-    eval_metrics(truth = BMI, estimate = .pred) %>% 
-    mutate(model = "gb3"),
-  gb4_fit %>% 
-    collect_predictions() %>% 
-    eval_metrics(truth = BMI, estimate = .pred) %>% 
-    mutate(model = "gb4"),
-  gb5_fit %>% 
-    collect_predictions() %>%
-    # Convert back from log transform
-    mutate(.pred = exp(.pred)) %>%
-    eval_metrics(truth = BMI, estimate = .pred) %>% 
-    mutate(model = "gb5")
-) %>% 
-  ggplot(aes(x = model, 
-             y = .estimate)) +
-  geom_point() +
-  labs(title = "OOS Evaluation Metrics",
-       x = NULL, y = NULL) +
-  facet_wrap(~ .metric, scales = "free_y") +
-  theme_bw() +
-  theme(panel.grid.minor.y = element_blank())
 ```
 
 ```{r}
-# Can't really interpret this plot like this, because of the 
-# transformations. Need to transform the target variable back
 bind_rows(
   gb1_fit %>% 
     collect_predictions() %>% 
@@ -574,87 +398,6 @@ bind_rows(
   geom_abline() +
   facet_wrap(~ model, scales = "free", ncol = 6)
 ```
-
-
-```{r}
-# Can't really interpret this plot like this, because of the 
-# transformations. Need to transform the target variable back
-bind_rows(
-  svm1_fit %>% 
-    collect_predictions() %>% 
-    mutate(model = "svm1"),
-  svm2_fit %>% 
-    collect_predictions() %>% 
-    mutate(model = "svm2"),
-  svm3_fit %>% 
-    collect_predictions() %>% 
-    mutate(model = "svm3"),
-  svm4_fit %>% 
-    collect_predictions() %>% 
-    # Convert back from log transform
-    mutate(.pred = exp(.pred)) %>% 
-    mutate(model = "svm4"),
-  svm5_fit %>% 
-    collect_predictions() %>% 
-    mutate(model = "svm5"),
-  svm6_fit %>% 
-    collect_predictions() %>% 
-    # Convert back from log transform
-    mutate(.pred = exp(.pred)) %>%
-    mutate(model = "svm6")
-) %>% 
-  ggplot(aes(BMI, .pred)) +
-  geom_point(alpha = 0.5) +
-  geom_abline() +
-  facet_wrap(~ model, scales = "free", ncol = 6)
-```
-
-Inspect variable importance:
-
-```{r, fig.width=8, fig.height=4.95, dpi=300, dev="png", warning=FALSE}
-gb1 %>%
-  extract_workflow() %>% 
-  extract_fit_parsnip() %>% 
-  vi() %>%
-  slice_max(order_by = Importance, n = 20) %>% 
-  ggplot(aes(Importance, reorder(Variable, Importance))) +
-  geom_col(fill = "midnightblue", colour = "white") +
-  labs(title = "Variable Importance",
-       subtitle = NULL,
-       y = "Predictor",
-       x = "Relative Variable Importance") +
-  theme_bw() +
-  theme(plot.title = element_text(face = "bold", size = 12),
-        plot.subtitle = element_text(face = "italic", colour = "grey50"))
-
-lin_final_fit %>%
-  extract_workflow() %>% 
-  extract_fit_parsnip() %>%
-  vi() %>% 
-  slice_max(order_by = Importance, n = 30) %>% 
-  mutate(Importance = ifelse(Sign == "NEG", Importance * -1, Importance)) %>% 
-  ggplot(aes(Importance, reorder(Variable, Importance),
-             fill = Sign)) +
-  geom_col(colour = "white") +
-  labs(title = "Variable Importance",
-       subtitle = "Only the most important predictors are shown.",
-       y = "Predictor",
-       x = "Coefficient") +
-  ggsci::scale_fill_jama() +
-  theme_bw() +
-  theme(plot.title = element_text(face = "bold", size = 12),
-        plot.subtitle = element_text(face = "italic", colour = "grey50"),
-        legend.position = "bottom")
-```
-
-***
-### Comparing the best of each three different models
-***
-
-- GB1
-
-
-<br>
 
 ***
 ### Building A Stacked Model
@@ -722,3 +465,62 @@ blended_gb %>%
   write_csv("blended_gb_metrics.csv")
 ```
 
+***
+### Make Predictions for Submission
+***
+
+Select the best hyperparameters from tuning, then fit that GB model on the entire available data instead of only data train and then make predictions on the preprocessed holdout without the target variable and store as csv with one column.
+
+```{r}
+gb1_tune <- readRDS("GB1_tune.rds")
+gb1_tune %>% show_best(metric = "rsq") %>% head(1) %>% glimpse()
+
+load("../Data/obesity_predict.Rdata")
+obesity_predict_processed <- obesity_predict %>% 
+  as_tibble() %>% 
+  distinct() %>% 
+  mutate(across(c(CAEC, CALC), 
+                ~ case_when(
+                  .x == "no" ~ 0,
+                  .x == "Sometimes" ~ 1,
+                  .x == "Frequently" ~ 2,
+                  .x == "Always" ~ 3
+                )),
+         across(where(is.character), as.factor))
+
+# Recipe: Data Preprocessing
+gb_rec <- recipe(BMI ~ .,
+                 data = dt_train) %>%
+  step_novel(all_nominal_predictors()) %>%
+  step_dummy(all_nominal_predictors(), one_hot = TRUE) %>% 
+  step_zv(all_predictors())
+
+# Model Specification
+gb_spec <- boost_tree(trees = tune(),
+                      tree_depth = tune(),
+                      min_n = tune(),
+                      loss_reduction = tune(),
+                      sample_size = tune(),
+                      mtry = tune(),
+                      learn_rate = tune()) %>%
+  set_engine("xgboost", importance = "impurity") %>%
+  set_mode("regression")
+
+# Workflow
+gb_wflow <- workflow() %>% 
+  add_recipe(
+    gb_rec,
+    blueprint = hardhat::default_recipe_blueprint(allow_novel_levels = TRUE)
+  ) %>% 
+  add_model(gb_spec)
+
+# Fit on the entire dataset
+gb_final_fit <- gb_wflow %>% 
+  finalize_workflow(select_best(gb1_tune, metric = "rsq")) %>% 
+  fit(data)
+
+gb_final_fit %>% 
+  augment(obesity_predict_processed) %>% 
+  transmute(BMI = .pred) %>% 
+  write_csv("../predictions_submission.csv")
+```
